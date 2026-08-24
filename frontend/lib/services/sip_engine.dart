@@ -51,6 +51,7 @@ class SipEngine {
   String? _remoteContact; // Simpan Contact header dari remote untuk Request-URI BYE
   String? _activeToHeader; // Simpan To header (dengan tag) untuk BYE
   String? _activeFromHeader; // Simpan From header untuk BYE
+  String? _activeRouteHeader; // Simpan Route header untuk BYE
 
   String? _lastProcessedInviteKey; // Untuk dedup retransmission
   String? _lastInviteResponseMsg; // Menyimpan respons terakhir (180 atau 200)
@@ -343,6 +344,8 @@ Content-Length: 0\r
       String routeHeaders = '';
       if (isIncomingCall && _incomingRecordRoute.isNotEmpty) {
          routeHeaders = 'Route: ' + _incomingRecordRoute.replaceAll('Record-Route:', 'Route:') + '\r\n';
+      } else if (!isIncomingCall && _activeRouteHeader != null && _activeRouteHeader!.isNotEmpty) {
+         routeHeaders = 'Route: ' + _activeRouteHeader!.replaceAll('Record-Route:', 'Route:') + '\r\n';
       }
       
       String toStr = _activeToHeader ?? (isIncomingCall ? _incomingFrom! : '<sip:$_currentTargetExtension@$_sipDomain>');
@@ -385,6 +388,7 @@ $routeHeaders'''
     _remoteContact = null;
     _activeToHeader = null;
     _activeFromHeader = null;
+    _activeRouteHeader = null;
     _currentTargetExtension = null;
     _outgoingOfferSdp = null;
     _incomingOfferSdp = null;
@@ -542,6 +546,7 @@ $routeHeaders'''
       _activeToHeader = toStr;
       _activeFromHeader = _extractHeader(msg, 'From');
       _remoteContact = _extractHeader(msg, 'Contact'); // Simpan Contact untuk routing BYE
+      _activeRouteHeader = _extractAllHeader(msg, 'Record-Route');
 
       final cseqRaw = _extractHeader(msg, 'CSeq');
       final cseqNum = cseqRaw.split(' ').first;

@@ -49,6 +49,8 @@ class SipEngine {
   String? _incomingOfferSdp; // SDP dari body INVITE masuk
   String? _outgoingOfferSdp; // SDP dari WebRTC saat call keluar
   String? _remoteContact; // Simpan Contact header dari remote untuk Request-URI BYE
+  String? _activeToHeader; // Simpan To header (dengan tag) untuk BYE
+  String? _activeFromHeader; // Simpan From header untuk BYE
 
   String? _lastProcessedInviteKey; // Untuk dedup retransmission
   String? _lastInviteResponseMsg; // Menyimpan respons terakhir (180 atau 200)
@@ -293,6 +295,77 @@ $sdpBody''';
 
     debugPrint('[SIP] Hangup dipanggil, mengakhiri panggilan lokal.');
 
+    _currentCSeq++;
+    if (callState == SipCallState.calling || callState == SipCallState.ringing) {
+      if (!isIncomingCall) {
+        // Kirim CANCEL
+        final cancelMsg = '''CANCEL sip:$_currentTargetExtension@$_sipDomain SIP/2.0\r
+Via: SIP/2.0/WS $_sipDomain:5060;branch=$_currentInviteBranch\r
+From: <sip:$_sipUser@$_sipDomain>;tag=$_currentTag\r
+To: <sip:$_currentTargetExtension@$_sipDomain>\r
+Call-ID: $targetCallId\r
+CSeq: $_currentCSeq CANCEL\r
+Max-Forwards: 70\r
+Content-Length: 0\r
+\r
+''';
+        _send(cancelMsg);
+        debugPrint('[SIP] Sent CANCEL');
+      } else {
+        // Reject incoming call (486 Busy Here)
+        final busyMsg = '''SIP/2.0 486 Busy Here\r
+Via: $_incomingVia\r
+From: $_incomingFrom\r
+To: $_incomingTo\r
+Call-ID: $_incomingCallId\r
+CSeq: $_incomingCseq\r
+Content-Length: 0\r
+\r
+''';
+        _send(busyMsg);
+        debugPrint('[SIP] Sent 486 Busy Here (Rejected by user)');
+      }
+    } else if (callState == SipCallState.accepted) {
+      // Kirim BYE
+      String targetUri = '';
+      if (_remoteContact != null && _remoteContact!.isNotEmpty) {
+        final regex = RegExp(r'<([^>]+)>');
+        final match = regex.firstMatch(_remoteContact!);
+        if (match != null) {
+          targetUri = match.group(1)!;
+        } else {
+          targetUri = _remoteContact!.trim();
+        }
+      } else {
+        targetUri = isIncomingCall ? 'sip:$incomingCaller@$_sipDomain' : 'sip:$_currentTargetExtension@$_sipDomain';
+      }
+
+      String routeHeaders = '';
+      if (isIncomingCall && _incomingRecordRoute.isNotEmpty) {
+         routeHeaders = 'Route: ' + _incomingRecordRoute.replaceAll('Record-Route:', 'Route:') + '\r\n';
+      }
+      
+      String toStr = _activeToHeader ?? (isIncomingCall ? _incomingFrom! : '<sip:$_currentTargetExtension@$_sipDomain>');
+      String fromStr = _activeFromHeader ?? (isIncomingCall ? _incomingTo! : '<sip:$_sipUser@$_sipDomain>;tag=$_currentTag');
+
+      if (isIncomingCall && _activeToHeader == null) {
+         fromStr = _incomingTo!;
+         toStr = _incomingFrom!;
+      }
+
+      final byeMsg = '''BYE $targetUri SIP/2.0\r
+Via: SIP/2.0/WS $_sipDomain:5060;branch=z9hG4bK-${_generateId()}\r
+From: $fromStr\r
+To: $toStr\r
+Call-ID: $targetCallId\r
+CSeq: $_currentCSeq BYE\r
+Max-Forwards: 70\r
+$routeHeaders'''
+          'Content-Length: 0\r\n\r\n';
+      _send(byeMsg);
+      debugPrint('[SIP] Sent BYE');
+    }
+
     // Reset semua state
     _logCallHistory();
     callState = SipCallState.ended;
@@ -310,6 +383,8 @@ $sdpBody''';
     isIncomingVideoCall = false;
     _currentTag = null;
     _remoteContact = null;
+    _activeToHeader = null;
+    _activeFromHeader = null;
     _currentTargetExtension = null;
     _outgoingOfferSdp = null;
     _incomingOfferSdp = null;
@@ -464,6 +539,8 @@ $sdpBody''';
 
       // Kirim ACK
       final toStr = _extractHeader(msg, 'To');
+      _activeToHeader = toStr;
+      _activeFromHeader = _extractHeader(msg, 'From');
       _remoteContact = _extractHeader(msg, 'Contact'); // Simpan Contact untuk routing BYE
 
       final cseqRaw = _extractHeader(msg, 'CSeq');

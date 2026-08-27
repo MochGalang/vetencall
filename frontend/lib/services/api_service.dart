@@ -98,6 +98,56 @@ class ApiService {
     return prefs.getString('user_id');
   }
 
+  static Future<List<Map<String, dynamic>>> fetchCommonGroups(String targetUserId) async {
+    final myUserId = await getUserId();
+    if (myUserId == null || myUserId.isEmpty) return [];
+
+    final response = await get('/users/$targetUserId/common-groups?user_id=$myUserId');
+    if (response['success'] == true && response['data'] != null) {
+      return List<Map<String, dynamic>>.from(response['data']);
+    }
+    return [];
+  }
+
+  static Future<Map<String, dynamic>> fetchBlockStatus(String targetUserId) async {
+    final myUserId = await getUserId();
+    if (myUserId == null || myUserId.isEmpty) return {'success': false};
+    return await get('/users/$targetUserId/block-status?user_id=$myUserId');
+  }
+
+  static Future<Map<String, dynamic>> toggleBlock(String targetUserId, String action) async {
+    final myUserId = await getUserId();
+    if (myUserId == null || myUserId.isEmpty) return {'success': false};
+    return await post('/users/block', {
+      'blocker_id': myUserId,
+      'blocked_id': targetUserId,
+      'action': action,
+    });
+  }
+
+  static Future<Map<String, dynamic>> toggleMute(String conversationId, bool isMuted) async {
+    final myUserId = await getUserId();
+    if (myUserId == null || myUserId.isEmpty) return {'success': false};
+    return await post('/conversations/mute', {
+      'user_id': myUserId,
+      'conversation_id': conversationId,
+      'is_muted': isMuted,
+    });
+  }
+
+  static Future<Map<String, dynamic>> uploadFile(String filePath) async {
+    try {
+      final request = http.MultipartRequest('POST', Uri.parse('$baseUrl/upload'));
+      request.files.add(await http.MultipartFile.fromPath('file', filePath));
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      if (response.body.isEmpty) return {'success': false, 'message': 'Respons kosong'};
+      return jsonDecode(response.body);
+    } catch (e) {
+      return {'success': false, 'message': 'Upload gagal: $e'};
+    }
+  }
+
   static Future<Map<String, String?>> getUserData() async {
     final prefs = await SharedPreferences.getInstance();
     String? sipPassword;

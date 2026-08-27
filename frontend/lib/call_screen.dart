@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:volume_controller/volume_controller.dart';
 import 'services/sip_engine.dart';
 import 'services/api_service.dart';
 import 'utils/string_utils.dart';
@@ -40,6 +42,8 @@ class _CallScreenState extends State<CallScreen>
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
+  double _volume = 0.5;
+
   late String _displayCallerName;
 
   @override
@@ -70,6 +74,19 @@ class _CallScreenState extends State<CallScreen>
       setState(() => _callStatus = widget.isVideoCall ? 'Panggilan Video Masuk...' : 'Panggilan Masuk...');
     } else {
       _startOutgoingCall();
+    }
+
+    if (!kIsWeb) {
+      try {
+        VolumeController.instance.getVolume().then((volume) {
+          if (mounted) setState(() => _volume = volume);
+        });
+        VolumeController.instance.addListener((volume) {
+          if (mounted) setState(() => _volume = volume);
+        });
+      } catch (e) {
+        debugPrint('Volume controller error: $e');
+      }
     }
   }
 
@@ -199,6 +216,11 @@ class _CallScreenState extends State<CallScreen>
     SipEngine().removeListener(this);
     _pulseController.dispose();
     _durationTimer?.cancel();
+    if (!kIsWeb) {
+      try {
+        VolumeController.instance.removeListener();
+      } catch (_) {}
+    }
     super.dispose();
   }
 
@@ -393,7 +415,7 @@ class _CallScreenState extends State<CallScreen>
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _buildFloatingSmallButton(Icons.person_add_alt_1_rounded),
+                        _buildFloatingSmallButton(Icons.person_add_alt_1_rounded, onTap: _showAddPersonModal),
                         const SizedBox(height: 16),
                         _buildFloatingSmallButton(Icons.flip_camera_ios_rounded, onTap: () {
                           SipEngine().webRtc.switchCamera();
@@ -547,11 +569,9 @@ class _CallScreenState extends State<CallScreen>
                     inactiveIconColor: Colors.white,
                     onTap: () {
                       if (!widget.isVideoCall) {
+                        SipEngine().upgradeToVideo();
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Fitur beralih ke Video Call (re-INVITE) sedang dikembangkan.'),
-                            duration: Duration(seconds: 2),
-                          ),
+                          const SnackBar(content: Text('Meminta perubahan ke Video...')),
                         );
                         return;
                       }
@@ -574,17 +594,20 @@ class _CallScreenState extends State<CallScreen>
                 ],
               ),
               const SizedBox(height: 20),
-              // BOTTOM ROW: Add Person, Volume Slider, More Options
+              // BOTTOM ROW: Add Person, Volume Slider
               Row(
                 children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.15),
-                      shape: BoxShape.circle,
+                  GestureDetector(
+                    onTap: _showAddPersonModal,
+                    child: Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.15),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.person_add_alt_1_rounded, color: Colors.white, size: 22),
                     ),
-                    child: const Icon(Icons.person_add_alt_1_rounded, color: Colors.white, size: 22),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -610,24 +633,19 @@ class _CallScreenState extends State<CallScreen>
                                 thumbColor: Colors.white,
                               ),
                               child: Slider(
-                                value: 0.7,
-                                onChanged: (val) {}, 
+                                value: _volume,
+                                onChanged: (val) {
+                                  setState(() => _volume = val);
+                                  if (!kIsWeb) {
+                                    VolumeController.instance.setVolume(val);
+                                  }
+                                }, 
                               ),
                             ),
                           ),
                         ],
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.15),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.more_horiz_rounded, color: Colors.white, size: 24),
                   ),
                 ],
               ),
@@ -721,8 +739,41 @@ class _CallScreenState extends State<CallScreen>
             iconColor: Colors.white,
             label: 'Pesan Suara',
             onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Fitur Pesan Suara belum tersedia')),
+              showModalBottomSheet(
+                context: context,
+                backgroundColor: Colors.white,
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                builder: (context) {
+                  return Container(
+                    height: 240,
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFE6F0FF),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.mic_rounded, size: 40, color: Color(0xFF0065FF)),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Tahan untuk merekam pesan suara',
+                          style: GoogleFonts.inter(fontSize: 16, color: Colors.black87),
+                        ),
+                        const SizedBox(height: 24),
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('Batal', style: TextStyle(color: Colors.red)),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               );
             },
           ),
@@ -782,6 +833,76 @@ class _CallScreenState extends State<CallScreen>
           ),
         ),
       ],
+    );
+  }
+
+  void _showAddPersonModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(24),
+          height: 400,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Tambah Partisipan',
+                style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.black87),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: FutureBuilder<Map<String, dynamic>>(
+                  future: ApiService.getUserId().then((id) => ApiService.get('/contacts?user_id=$id')),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    final contacts = snapshot.data?['data'] as List? ?? [];
+                    if (contacts.isEmpty) {
+                      return const Center(child: Text('Tidak ada kontak'));
+                    }
+                    return ListView.builder(
+                      itemCount: contacts.length,
+                      itemBuilder: (context, index) {
+                        final c = contacts[index];
+                        return ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: const Color(0xFFE6F0FF),
+                            child: Text(
+                              StringUtils.getInitials(c['username']),
+                              style: const TextStyle(color: Color(0xFF0065FF)),
+                            )
+                          ),
+                          title: Text(c['username']),
+                          subtitle: Text('Ext: ${c['sip_username']}'),
+                          onTap: () async {
+                            Navigator.pop(context);
+                            final myCallId = SipEngine().activeCallId;
+                            if (myCallId != null) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Mengundang ${c['username']}...'))
+                              );
+                              await ApiService.post('/calls/conference', {
+                                'current_call_id': myCallId,
+                                'target_sip_extension': c['sip_username'],
+                              });
+                            }
+                          },
+                        );
+                      },
+                    );
+                  }
+                ),
+              ),
+            ],
+          ),
+        );
+      }
     );
   }
 }

@@ -8,7 +8,7 @@ import 'utils/string_utils.dart';
 import 'chat_conversation_page.dart';
 import 'widgets/veten_bottom_nav.dart';
 import 'create_group_page.dart';
-
+import 'add_contact_page.dart';
 class KontakPage extends StatefulWidget {
   const KontakPage({super.key});
 
@@ -196,70 +196,15 @@ class _KontakPageState extends State<KontakPage> {
   // ==========================================
 
   void _showAddContactDialog() {
-    final TextEditingController nameController = TextEditingController();
-    final TextEditingController sipController = TextEditingController();
-
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text(
-            'Simpan ke Kontak HP',
-            style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 18),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration: InputDecoration(
-                  labelText: 'Nama Kontak',
-                  hintText: 'Cth: Budi Resepsionis',
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                ),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: sipController,
-                keyboardType: TextInputType.phone,
-                decoration: InputDecoration(
-                  labelText: 'Nomor Telepon / SIP',
-                  hintText: 'Cth: 0812... atau 1002',
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child:
-                  Text('Batal', style: GoogleFonts.inter(color: Colors.grey)),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0065FF),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8)),
-              ),
-              onPressed: () async {
-                final name = nameController.text.trim();
-                final sip = sipController.text.trim();
-                if (name.isNotEmpty && sip.isNotEmpty) {
-                  await _saveManualContact(name, sip);
-                  if (context.mounted) Navigator.pop(context);
-                }
-              },
-              child:
-                  Text('Simpan', style: GoogleFonts.inter(color: Colors.white)),
-            ),
-          ],
-        );
-      },
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => AddContactPage(
+          onSave: (name, phone) async {
+            await _saveManualContact(name, phone);
+          },
+        ),
+      ),
     );
   }
 
@@ -346,21 +291,7 @@ class _KontakPageState extends State<KontakPage> {
                                   ),
                                   itemBuilder: (context, index) {
                                     if (index == 0) {
-                                      return ListTile(
-                                        contentPadding: EdgeInsets.zero,
-                                        leading: const CircleAvatar(
-                                          radius: 24,
-                                          backgroundColor: Color(0xFF0065FF),
-                                          child: Icon(Icons.group_add_rounded, color: Colors.white),
-                                        ),
-                                        title: Text(
-                                          'Grup Baru',
-                                          style: GoogleFonts.inter(
-                                            color: const Color(0xFF131B2E),
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
+                                      return InkWell(
                                         onTap: () {
                                           Navigator.push(
                                             context,
@@ -369,6 +300,35 @@ class _KontakPageState extends State<KontakPage> {
                                             ),
                                           );
                                         },
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                                          child: Row(
+                                            crossAxisAlignment: CrossAxisAlignment.center,
+                                            children: [
+                                              Container(
+                                                width: 52,
+                                                height: 52,
+                                                decoration: const BoxDecoration(
+                                                  shape: BoxShape.circle,
+                                                  color: Color(0xFF0065FF),
+                                                ),
+                                                alignment: Alignment.center,
+                                                child: const Icon(Icons.group_add_rounded, color: Colors.white, size: 26),
+                                              ),
+                                              const SizedBox(width: 16),
+                                              Expanded(
+                                                child: Text(
+                                                  'Grup Baru',
+                                                  style: GoogleFonts.inter(
+                                                    color: const Color(0xFF131B2E),
+                                                    fontSize: 16,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
                                       );
                                     }
                                     return _buildContactItem(_filteredContactData[index - 1]);

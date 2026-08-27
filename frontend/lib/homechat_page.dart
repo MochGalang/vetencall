@@ -29,17 +29,30 @@ class _HomeChatPageState extends State<HomeChatPage> {
 
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  
+  String _selectedFilter = 'Semua';
+  bool _isSelectionMode = false;
+  final Set<String> _selectedChats = {};
 
   List<Map<String, dynamic>> get _filteredChatData {
-    if (_searchQuery.isEmpty) {
-      return _chatData;
+    List<Map<String, dynamic>> result = _chatData;
+
+    if (_selectedFilter == 'Belum dibaca') {
+      result = result.where((chat) => (chat['unread'] as int? ?? 0) > 0).toList();
+    } else if (_selectedFilter == 'Grup') {
+      result = result.where((chat) => chat['isGroup'] == true).toList();
     }
-    return _chatData.where((chat) {
-      final name = chat['name']?.toString().toLowerCase() ?? '';
-      final message = chat['message']?.toString().toLowerCase() ?? '';
+
+    if (_searchQuery.isNotEmpty) {
       final query = _searchQuery.toLowerCase();
-      return name.contains(query) || message.contains(query);
-    }).toList();
+      result = result.where((chat) {
+        final name = chat['name']?.toString().toLowerCase() ?? '';
+        final message = chat['message']?.toString().toLowerCase() ?? '';
+        return name.contains(query) || message.contains(query);
+      }).toList();
+    }
+    
+    return result;
   }
 
 
@@ -266,6 +279,47 @@ class _HomeChatPageState extends State<HomeChatPage> {
   }
 
   Widget _buildTopBar() {
+    if (_isSelectionMode) {
+      return Padding(
+        padding: const EdgeInsets.only(left: 20, right: 20, top: 20, bottom: 10),
+        child: Row(
+          children: [
+            IconButton(
+              icon: const Icon(Icons.close, color: Colors.black54),
+              onPressed: () {
+                setState(() {
+                  _isSelectionMode = false;
+                  _selectedChats.clear();
+                });
+              },
+            ),
+            const SizedBox(width: 8),
+            Text(
+              '${_selectedChats.length}',
+              style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const Spacer(),
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.red),
+              onPressed: () {
+                setState(() {
+                  _chatData.removeWhere((chat) {
+                     String id = chat['isGroup'] ? 'group_${chat['conversationId']}' : chat['conversationId'];
+                     return _selectedChats.contains(id);
+                  });
+                  _selectedChats.clear();
+                  _isSelectionMode = false;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Chat dihapus (Sementara di Frontend)')),
+                );
+              },
+            ),
+          ],
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.only(left: 20, right: 20, top: 20, bottom: 10),
       child: Column(
@@ -342,18 +396,85 @@ class _HomeChatPageState extends State<HomeChatPage> {
               ),
             ),
           ),
+          const SizedBox(height: 16),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _buildFilterChip('Semua'),
+                const SizedBox(width: 8),
+                _buildFilterChip('Belum dibaca'),
+                const SizedBox(width: 8),
+                _buildFilterChip('Grup'),
+              ],
+            ),
+          ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildFilterChip(String label) {
+    final isSelected = _selectedFilter == label;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _selectedFilter = label;
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF133E87) : const Color(0xFFF0F2F5),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected ? const Color(0xFF133E87) : Colors.transparent,
+          ),
+        ),
+        child: Text(
+          label,
+          style: GoogleFonts.inter(
+            color: isSelected ? Colors.white : Colors.grey.shade700,
+            fontSize: 14,
+            fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+          ),
+        ),
       ),
     );
   }
 
   Widget _buildChatItem(Map<String, dynamic> chat) {
     final bool isUnread = chat['unread'] > 0;
+    final String convId = chat['conversationId']?.toString() ?? '';
+    final String uniqueId = chat['isGroup'] == true ? 'group_$convId' : convId;
+    final bool isSelected = _selectedChats.contains(uniqueId);
 
     return GestureDetector(
+        onLongPress: () {
+          setState(() {
+            _isSelectionMode = true;
+            if (isSelected) {
+              _selectedChats.remove(uniqueId);
+              if (_selectedChats.isEmpty) _isSelectionMode = false;
+            } else {
+              _selectedChats.add(uniqueId);
+            }
+          });
+        },
         onTap: () {
+          if (_isSelectionMode) {
+            setState(() {
+              if (isSelected) {
+                _selectedChats.remove(uniqueId);
+                if (_selectedChats.isEmpty) _isSelectionMode = false;
+              } else {
+                _selectedChats.add(uniqueId);
+              }
+            });
+            return;
+          }
+
           // Reset badge unread ke 0 saat chat dibuka
-          final convId = chat['conversationId']?.toString() ?? '';
           if ((chat['unread'] as int?) != null && chat['unread'] > 0) {
             setState(() {
               chat['unread'] = 0;
@@ -377,7 +498,7 @@ class _HomeChatPageState extends State<HomeChatPage> {
               MaterialPageRoute(
                 builder: (context) => ChatConversationPage(
                   userName: chat['name'],
-                  conversationId: chat['conversationId'] ?? '',
+                  conversationId: convId,
                   receiverId: chat['receiverId'] ?? '',
                   sipUsername: chat['sipUsername'] ?? '',
                   isOnline: chat['isOnline'] == true,
@@ -392,20 +513,20 @@ class _HomeChatPageState extends State<HomeChatPage> {
           padding: isUnread
               ? const EdgeInsets.all(12)
               : const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: isUnread
-              ? BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.grey.shade100, width: 1),
-                  boxShadow: [
+          decoration: BoxDecoration(
+            color: isSelected ? const Color(0xFFE6F0FF) : (isUnread ? Colors.white : Colors.transparent),
+            borderRadius: BorderRadius.circular(16),
+            border: (isUnread || isSelected) ? Border.all(color: isSelected ? const Color(0xFF0065FF) : Colors.grey.shade100, width: 1) : null,
+            boxShadow: isUnread
+                ? [
                     BoxShadow(
                       color: Colors.black.withValues(alpha: 0.02),
                       blurRadius: 10,
                       offset: const Offset(0, 2),
                     )
-                  ],
-                )
-              : null,
+                  ]
+                : null,
+          ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [

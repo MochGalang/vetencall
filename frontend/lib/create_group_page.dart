@@ -60,6 +60,13 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
 
     try {
       final List<String> memberIds = _selectedContacts.map((c) => c['id'].toString()).toList();
+      
+      // Pastikan pembuat grup juga masuk ke dalam memberIds
+      final myUserId = await ApiService.getUserId();
+      if (myUserId != null && !memberIds.contains(myUserId)) {
+        memberIds.add(myUserId);
+      }
+
       final response = await ApiService.createGroup(_groupNameController.text.trim(), memberIds);
 
       if (!mounted) return;

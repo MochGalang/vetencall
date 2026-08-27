@@ -1,15 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'utils/string_utils.dart';
+import 'services/api_service.dart';
 
 class UserChatDetailPage extends StatefulWidget {
+  final String userId;
   final String userName;
   final String sipUsername;
+  final bool isOnline;
+  final String? lastSeen;
 
   const UserChatDetailPage({
     super.key,
+    required this.userId,
     required this.userName,
     this.sipUsername = '',
+    this.isOnline = false,
+    this.lastSeen,
   });
 
   @override
@@ -17,7 +24,28 @@ class UserChatDetailPage extends StatefulWidget {
 }
 
 class _UserChatDetailPageState extends State<UserChatDetailPage> {
-  bool _disappearingMessages = false;
+
+  bool _isBlocked = false;
+  bool _isMuted = false;
+  bool _isLoadingBlock = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchSettingsStatus();
+  }
+
+  Future<void> _fetchSettingsStatus() async {
+    final response = await ApiService.fetchBlockStatus(widget.userId);
+    if (mounted && response['success'] == true && response['data'] != null) {
+      setState(() {
+        _isBlocked = response['data']['is_blocked_by_me'] == true;
+        _isLoadingBlock = false;
+      });
+    } else {
+      if (mounted) setState(() => _isLoadingBlock = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -139,19 +167,20 @@ class _UserChatDetailPageState extends State<UserChatDetailPage> {
                   ),
                 ),
               ),
-              Positioned(
-                right: 4,
-                bottom: 4,
-                child: Container(
-                  width: 24,
-                  height: 24,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF22C55E),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 4),
+              if (widget.isOnline)
+                Positioned(
+                  right: 4,
+                  bottom: 4,
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF22C55E),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 4),
+                    ),
                   ),
                 ),
-              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -166,7 +195,7 @@ class _UserChatDetailPageState extends State<UserChatDetailPage> {
           ),
           const SizedBox(height: 4),
           Text(
-            '@${widget.userName.replaceAll(' ', '').toLowerCase()} • Online',
+            '@${widget.userName.replaceAll(' ', '').toLowerCase()} • ${widget.isOnline ? 'Online' : StringUtils.formatLastSeen(widget.lastSeen)}',
             style: GoogleFonts.inter(
               color: const Color(0xFF424656),
               fontSize: 14,
@@ -413,11 +442,12 @@ class _UserChatDetailPageState extends State<UserChatDetailPage> {
           icon: Icons.notifications_none_rounded,
           title: 'Mute notifications',
           trailing: Switch(
-            value: _disappearingMessages,
-            onChanged: (val) {
+            value: _isMuted,
+            onChanged: (val) async {
               setState(() {
-                _disappearingMessages = val;
+                _isMuted = val;
               });
+              await ApiService.toggleMute('0', val); // Mock conv ID
             },
             activeThumbColor: Colors.white,
             activeTrackColor: const Color(0xFF0065FF),
@@ -431,120 +461,156 @@ class _UserChatDetailPageState extends State<UserChatDetailPage> {
   }
 
   Widget _buildCommonGroupsSection() {
-    return _buildListSection(
-      title: 'COMMON GROUPS',
-      children: [
-        _buildGroupTile(
-          initials: 'LL',
-          color: const Color(0x330065FF),
-          textColor: const Color(0xFF004FCB),
-          title: 'Lumina Labs Product Team',
-          subtitle: 'Lela, Marc, Sarah + 12 others',
-        ),
-        const Divider(height: 1, color: Color(0x1AC2C6D8)),
-        _buildGroupTile(
-          initials: 'D',
-          color: const Color(0xFFDCE3EB),
-          textColor: const Color(0xFF5E656C),
-          title: 'Design Sync',
-          subtitle: 'Lela, You + 4 others',
-        ),
-      ],
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: ApiService.fetchCommonGroups(widget.userId),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(16.0),
+              child: CircularProgressIndicator(),
+            ),
+          );
+        }
+
+        final groups = snapshot.data ?? [];
+        if (groups.isEmpty) {
+          // Sembunyikan bagian ini jika tidak ada grup yang sama
+          return const SizedBox.shrink();
+        }
+
+        return Container(
+          padding: const EdgeInsets.only(top: 32),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  '${groups.length} GRUP YANG SAMA',
+                  style: GoogleFonts.inter(
+                    color: const Color(0xFF424656),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  border: Border(
+                    top: BorderSide(
+                        color: const Color(0xFFC2C6D8).withValues(alpha: 0.2)),
+                    bottom: BorderSide(
+                        color: const Color(0xFFC2C6D8).withValues(alpha: 0.2)),
+                  ),
+                ),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: groups.length,
+                  separatorBuilder: (context, index) => Divider(
+                    height: 1,
+                    indent: 72,
+                    color: const Color(0xFFC2C6D8).withValues(alpha: 0.2),
+                  ),
+                  itemBuilder: (context, index) {
+                    final group = groups[index];
+                    return ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
+                      leading: Container(
+                        width: 48,
+                        height: 48,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFF1F5F9),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.people_alt_rounded,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                      title: Text(
+                        group['group_name'] ?? 'Grup Tidak Dikenal',
+                        style: GoogleFonts.inter(
+                          color: const Color(0xFF131B2E),
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Anda berdua ada di grup ini',
+                        style: GoogleFonts.inter(
+                          color: const Color(0xFF6B7280),
+                          fontSize: 14,
+                        ),
+                      ),
+                      onTap: () {
+                        // Nanti bisa ditambahkan navigasi ke grup
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
+  Widget _buildDangerZoneSection() {
+    if (_isLoadingBlock) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
-  Widget _buildGroupTile({
-    required String initials,
-    required Color color,
-    required Color textColor,
-    required String title,
-    required String subtitle,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Row(
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF2F2),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFFEE2E2), width: 1),
+      ),
+      child: Column(
         children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: color,
-              shape: BoxShape.circle,
+          ListTile(
+            onTap: () async {
+              final newStatus = !_isBlocked;
+              setState(() => _isBlocked = newStatus);
+              await ApiService.toggleBlock(widget.userId, newStatus ? 'block' : 'unblock');
+            },
+            leading: Icon(
+              _isBlocked ? Icons.block : Icons.block_outlined,
+              color: const Color(0xFFDC2626),
             ),
-            alignment: Alignment.center,
-            child: Text(
-              initials,
+            title: Text(
+              _isBlocked ? 'Unblock ${widget.userName}' : 'Block ${widget.userName}',
               style: GoogleFonts.inter(
-                color: textColor,
+                color: const Color(0xFFDC2626),
                 fontSize: 16,
                 fontWeight: FontWeight.w600,
               ),
             ),
           ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: GoogleFonts.inter(
-                    color: const Color(0xFF131B2E),
-                    fontSize: 16,
-                  ),
-                ),
-                Text(
-                  subtitle,
-                  style: GoogleFonts.inter(
-                    color: const Color(0xFF424656),
-                    fontSize: 14,
-                  ),
-                ),
-              ],
+          const Divider(height: 1, color: Color(0xFFFEE2E2)),
+          ListTile(
+            onTap: () {},
+            leading: const Icon(
+              Icons.warning_amber_rounded,
+              color: Color(0xFFDC2626),
+            ),
+            title: Text(
+              'Report User',
+              style: GoogleFonts.inter(
+                color: const Color(0xFFDC2626),
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildDangerZoneSection() {
-    return _buildListSection(
-      title: 'DANGER ZONE',
-      titleColor: const Color(0xFFBA1A1A),
-      borderColor: const Color(0x33BA1A1A),
-      children: [
-        _buildDangerTile(
-          icon: Icons.block_outlined,
-          title: 'Block ${widget.userName}',
-        ),
-        const Divider(height: 1, color: Color(0x1AC2C6D8)),
-        _buildDangerTile(
-          icon: Icons.error_outline_rounded,
-          title: 'Report User',
-        ),
-      ],
-    );
-  }
-
-  Widget _buildDangerTile({required IconData icon, required String title}) {
-    return InkWell(
-      onTap: () {},
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          children: [
-            Icon(icon, color: const Color(0xFFBA1A1A)),
-            const SizedBox(width: 16),
-            Text(
-              title,
-              style: GoogleFonts.inter(
-                color: const Color(0xFFBA1A1A),
-                fontSize: 16,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

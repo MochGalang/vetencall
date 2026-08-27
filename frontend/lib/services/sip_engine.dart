@@ -48,7 +48,11 @@ class SipEngine {
   String _incomingRecordRoute = '';
   String? _incomingOfferSdp; // SDP dari body INVITE masuk
   String? _outgoingOfferSdp; // SDP dari WebRTC saat call keluar
-  String? _remoteContact; // Simpan Contact header dari remote untuk Request-URI BYE
+  String?
+      _remoteContact; // Simpan Contact header dari remote untuk Request-URI BYE
+  String? _activeToHeader; // Simpan To header (dengan tag) untuk BYE
+  String? _activeFromHeader; // Simpan From header untuk BYE
+  String? _activeRouteHeader; // Simpan Route header untuk BYE
 
   String? _lastProcessedInviteKey; // Untuk dedup retransmission
   String? _lastInviteResponseMsg; // Menyimpan respons terakhir (180 atau 200)
@@ -73,7 +77,7 @@ class SipEngine {
 
   void _logCallHistory() {
     if (_currentTargetExtension == null && incomingCaller == null) return;
-    
+
     String type;
     if (isIncomingCall) {
       if (callState == SipCallState.accepted) {
@@ -85,15 +89,16 @@ class SipEngine {
       type = 'Keluar';
     }
 
-    final name = isIncomingCall 
-        ? (incomingCaller ?? 'Unknown') 
+    final name = isIncomingCall
+        ? (incomingCaller ?? 'Unknown')
         : (_currentTargetExtension ?? 'Unknown');
 
-    final isVideo = isIncomingCall 
-        ? isIncomingVideoCall 
+    final isVideo = isIncomingCall
+        ? isIncomingVideoCall
         : (_outgoingOfferSdp?.contains('m=video') ?? false);
 
-    CallHistoryService.addCallRecord(name: name, type: type, isVideo: isVideo).catchError((e) {
+    CallHistoryService.addCallRecord(name: name, type: type, isVideo: isVideo)
+        .catchError((e) {
       debugPrint('[SIP] Error logging history: $e');
     });
   }
@@ -107,10 +112,12 @@ class SipEngine {
   Future<void> connect() async {
     // Guard: jika sudah terhubung atau sedang proses registrasi, jangan buat koneksi baru
     if (_channel != null) {
-      debugPrint('[SIP] Koneksi sudah aktif (channel tidak null), skip connect().');
+      debugPrint(
+          '[SIP] Koneksi sudah aktif (channel tidak null), skip connect().');
       return;
     }
-    if (regState == SipRegState.registered || regState == SipRegState.registering) {
+    if (regState == SipRegState.registered ||
+        regState == SipRegState.registering) {
       debugPrint('[SIP] Sudah registered/registering, skip connect().');
       return;
     }
@@ -184,7 +191,7 @@ class SipEngine {
     _regCallId = _generateId();
     _regFromTag = _generateId();
     _regCSeq = 1;
-    
+
     _sendRegisterRequest();
 
     // Auto renew registrasi tiap 100 detik (karena expires: 120)
@@ -241,7 +248,84 @@ Content-Length: 0\r
     _callWithWebRtc(targetExtension, isVideo: isVideo);
   }
 
-  Future<void> _callWithWebRtc(String targetExtension, {bool isVideo = false}) async {
+  Future<void> upgradeToVideo() async {
+    if (callState != SipCallState.accepted) return;
+    
+    try {
+      debugPrint('[SIP] Meminta re-INVITE untuk upgrade ke Video...');
+      // 1. Dapatkan SDP offer baru dengan video=true dari WebRTC
+      final sdpBody = await webRtc.createOffer(isVideo: true);
+      _currentCSeq++;
+      _outgoingOfferSdp = sdpBody;
+
+      String targetUri = '';
+      if (_remoteContact != null && _remoteContact!.isNotEmpty) {
+        final regex = RegExp(r'<([^>]+)>');
+        final match = regex.firstMatch(_remoteContact!);
+        if (match != null) {
+          targetUri = match.group(1)!;
+        } else {
+          targetUri = _remoteContact!.trim();
+        }
+      } else {
+        targetUri = isIncomingCall
+            ? 'sip:$incomingCaller@$_sipDomain'
+            : 'sip:$_currentTargetExtension@$_sipDomain';
+      }
+
+      String routeHeaders = '';
+      if (isIncomingCall && _incomingRecordRoute.isNotEmpty) {
+        routeHeaders = 'Route: ' +
+            _incomingRecordRoute.replaceAll('Record-Route:', 'Route:') +
+            '\r\n';
+      } else if (!isIncomingCall &&
+          _activeRouteHeader != null &&
+          _activeRouteHeader!.isNotEmpty) {
+        routeHeaders = 'Route: ' +
+            _activeRouteHeader!.replaceAll('Record-Route:', 'Route:') +
+            '\r\n';
+      }
+
+      String toStr = _activeToHeader ??
+          (isIncomingCall
+              ? _incomingFrom!
+              : '<sip:$_currentTargetExtension@$_sipDomain>');
+      String fromStr = _activeFromHeader ??
+          (isIncomingCall
+              ? _incomingTo!
+              : '<sip:$_sipUser@$_sipDomain>;tag=$_currentTag');
+
+      if (isIncomingCall && _activeToHeader == null) {
+        fromStr = _incomingTo!;
+        toStr = _incomingFrom!;
+      }
+
+      final callId = _currentCallId ?? _incomingCallId ?? '';
+      _currentInviteBranch = 'z9hG4bK-${_generateId()}';
+      
+      final inviteMsg = '''INVITE $targetUri SIP/2.0\r
+Via: SIP/2.0/WS $_sipDomain:5060;branch=$_currentInviteBranch\r
+From: $fromStr\r
+To: $toStr\r
+Call-ID: $callId\r
+CSeq: $_currentCSeq INVITE\r
+Contact: <sip:$_sipUser@$_sipDomain;transport=ws>\r
+Max-Forwards: 70\r
+$routeHeaders'''
+          'Content-Type: application/sdp\r\n'
+          'Content-Length: ${utf8.encode(sdpBody).length}\r\n'
+          '\r\n'
+          '$sdpBody';
+
+      _send(inviteMsg);
+      debugPrint('[SIP] re-INVITE sent for Video Upgrade');
+    } catch (e) {
+      debugPrint('[SIP] Error saat upgradeToVideo: $e');
+    }
+  }
+
+  Future<void> _callWithWebRtc(String targetExtension,
+      {bool isVideo = false}) async {
     try {
       _isCallAuthRetrying = false;
       _currentTargetExtension = targetExtension;
@@ -256,7 +340,8 @@ Content-Length: 0\r
       _currentInviteBranch = 'z9hG4bK-${_generateId()}';
 
       // 2. Kirim pesan SIP INVITE awal (tanpa autentikasi)
-      final inviteMsg = '''INVITE sip:$_currentTargetExtension@$_sipDomain SIP/2.0\r
+      final inviteMsg =
+          '''INVITE sip:$_currentTargetExtension@$_sipDomain SIP/2.0\r
 Via: SIP/2.0/WS $_sipDomain:5060;branch=$_currentInviteBranch\r
 From: <sip:$_sipUser@$_sipDomain>;tag=$_currentTag\r
 To: <sip:$_currentTargetExtension@$_sipDomain>\r
@@ -271,7 +356,6 @@ $sdpBody''';
 
       _send(inviteMsg);
       debugPrint('[SIP] Initial INVITE dikirim ke $_currentTargetExtension');
-
     } catch (e) {
       debugPrint('[SIP] Error setup WebRTC untuk outgoing call: $e');
       callState = SipCallState.failed;
@@ -293,6 +377,95 @@ $sdpBody''';
 
     debugPrint('[SIP] Hangup dipanggil, mengakhiri panggilan lokal.');
 
+    _currentCSeq++;
+    if (callState == SipCallState.calling ||
+        callState == SipCallState.ringing) {
+      if (!isIncomingCall) {
+        // Kirim CANCEL
+        final cancelMsg =
+            '''CANCEL sip:$_currentTargetExtension@$_sipDomain SIP/2.0\r
+Via: SIP/2.0/WS $_sipDomain:5060;branch=$_currentInviteBranch\r
+From: <sip:$_sipUser@$_sipDomain>;tag=$_currentTag\r
+To: <sip:$_currentTargetExtension@$_sipDomain>\r
+Call-ID: $targetCallId\r
+CSeq: $_currentCSeq CANCEL\r
+Max-Forwards: 70\r
+Content-Length: 0\r
+\r
+''';
+        _send(cancelMsg);
+        debugPrint('[SIP] Sent CANCEL');
+      } else {
+        // Reject incoming call (486 Busy Here)
+        final busyMsg = '''SIP/2.0 486 Busy Here\r
+Via: $_incomingVia\r
+From: $_incomingFrom\r
+To: $_incomingTo\r
+Call-ID: $_incomingCallId\r
+CSeq: $_incomingCseq\r
+Content-Length: 0\r
+\r
+''';
+        _send(busyMsg);
+        debugPrint('[SIP] Sent 486 Busy Here (Rejected by user)');
+      }
+    } else if (callState == SipCallState.accepted) {
+      // Kirim BYE
+      String targetUri = '';
+      if (_remoteContact != null && _remoteContact!.isNotEmpty) {
+        final regex = RegExp(r'<([^>]+)>');
+        final match = regex.firstMatch(_remoteContact!);
+        if (match != null) {
+          targetUri = match.group(1)!;
+        } else {
+          targetUri = _remoteContact!.trim();
+        }
+      } else {
+        targetUri = isIncomingCall
+            ? 'sip:$incomingCaller@$_sipDomain'
+            : 'sip:$_currentTargetExtension@$_sipDomain';
+      }
+
+      String routeHeaders = '';
+      if (isIncomingCall && _incomingRecordRoute.isNotEmpty) {
+        routeHeaders = 'Route: ' +
+            _incomingRecordRoute.replaceAll('Record-Route:', 'Route:') +
+            '\r\n';
+      } else if (!isIncomingCall &&
+          _activeRouteHeader != null &&
+          _activeRouteHeader!.isNotEmpty) {
+        routeHeaders = 'Route: ' +
+            _activeRouteHeader!.replaceAll('Record-Route:', 'Route:') +
+            '\r\n';
+      }
+
+      String toStr = _activeToHeader ??
+          (isIncomingCall
+              ? _incomingFrom!
+              : '<sip:$_currentTargetExtension@$_sipDomain>');
+      String fromStr = _activeFromHeader ??
+          (isIncomingCall
+              ? _incomingTo!
+              : '<sip:$_sipUser@$_sipDomain>;tag=$_currentTag');
+
+      if (isIncomingCall && _activeToHeader == null) {
+        fromStr = _incomingTo!;
+        toStr = _incomingFrom!;
+      }
+
+      final byeMsg = '''BYE $targetUri SIP/2.0\r
+Via: SIP/2.0/WS $_sipDomain:5060;branch=z9hG4bK-${_generateId()}\r
+From: $fromStr\r
+To: $toStr\r
+Call-ID: $targetCallId\r
+CSeq: $_currentCSeq BYE\r
+Max-Forwards: 70\r
+$routeHeaders'''
+          'Content-Length: 0\r\n\r\n';
+      _send(byeMsg);
+      debugPrint('[SIP] Sent BYE');
+    }
+
     // Reset semua state
     _logCallHistory();
     callState = SipCallState.ended;
@@ -310,6 +483,9 @@ $sdpBody''';
     isIncomingVideoCall = false;
     _currentTag = null;
     _remoteContact = null;
+    _activeToHeader = null;
+    _activeFromHeader = null;
+    _activeRouteHeader = null;
     _currentTargetExtension = null;
     _outgoingOfferSdp = null;
     _incomingOfferSdp = null;
@@ -429,11 +605,13 @@ $sdpBody''';
         webRtc.hangup();
       }
       debugPrint('[SIP] ❌ Auth gagal (403)');
-    } else if ((msg.startsWith('SIP/2.0 503') || msg.startsWith('SIP/2.0 5')) && cseqHeader.contains('REGISTER')) {
+    } else if ((msg.startsWith('SIP/2.0 503') || msg.startsWith('SIP/2.0 5')) &&
+        cseqHeader.contains('REGISTER')) {
       // 503 Service Unavailable atau 5xx error lainnya saat REGISTER
       // Tutup channel agar guard di connect() tidak memblokir reconnect
       final statusLine = msg.split('\r\n').first;
-      debugPrint('[SIP] ⚠️ Server error ($statusLine). Menutup koneksi, coba ulang dalam 5 detik...');
+      debugPrint(
+          '[SIP] ⚠️ Server error ($statusLine). Menutup koneksi, coba ulang dalam 5 detik...');
       _channel?.sink.close();
       _channel = null;
       _regTimer?.cancel();
@@ -464,7 +642,11 @@ $sdpBody''';
 
       // Kirim ACK
       final toStr = _extractHeader(msg, 'To');
-      _remoteContact = _extractHeader(msg, 'Contact'); // Simpan Contact untuk routing BYE
+      _activeToHeader = toStr;
+      _activeFromHeader = _extractHeader(msg, 'From');
+      _remoteContact =
+          _extractHeader(msg, 'Contact'); // Simpan Contact untuk routing BYE
+      _activeRouteHeader = _extractAllHeader(msg, 'Record-Route');
 
       final cseqRaw = _extractHeader(msg, 'CSeq');
       final cseqNum = cseqRaw.split(' ').first;
@@ -487,7 +669,9 @@ $sdpBody''';
       final recordRouteRaw = _extractAllHeader(msg, 'Record-Route');
       String routeHeaders = '';
       if (recordRouteRaw.isNotEmpty) {
-        routeHeaders = 'Route: ' + recordRouteRaw.replaceAll('Record-Route:', 'Route:') + '\r\n';
+        routeHeaders = 'Route: ' +
+            recordRouteRaw.replaceAll('Record-Route:', 'Route:') +
+            '\r\n';
       }
 
       final ackMsg = 'ACK $ackUri SIP/2.0\r\n'
@@ -593,7 +777,8 @@ Content-Length: 0\r
 
       // Cek apakah penelepon ada di daftar blokir
       if (ApiService.blockedSipUsernames.contains(incomingCaller)) {
-        debugPrint('[SIP] Penelepon ($incomingCaller) diblokir. Mengirim 486 Busy Here.');
+        debugPrint(
+            '[SIP] Penelepon ($incomingCaller) diblokir. Mengirim 486 Busy Here.');
         final busyMsg = '''SIP/2.0 486 Busy Here\r
 Via: $via\r
 From: $fromStr\r
@@ -609,7 +794,8 @@ Content-Length: 0\r
 
       isIncomingCall = true;
 
-      _remoteContact = _extractHeader(msg, 'Contact'); // Simpan Contact untuk routing BYE
+      _remoteContact =
+          _extractHeader(msg, 'Contact'); // Simpan Contact untuk routing BYE
 
       _incomingCallId = callId;
       _incomingCseq = cseq;
@@ -705,7 +891,7 @@ Content-Length: 0\r
           // Ganti di o= line (origin)
           sdp = sdp.replaceAll('o=IN IP4 $internalIp', 'o=IN IP4 $_sipDomain');
         }
-        
+
         // Selalu ganti IP di a=candidate: lines agar ICE bisa konek ke public IP
         // Asterisk sering menyertakan IP lokal di a=candidate walaupun c=IN IP4 sudah benar
         sdp = sdp.replaceAllMapped(
@@ -719,7 +905,8 @@ Content-Length: 0\r
             return m.group(0)!;
           },
         );
-        debugPrint('[SIP] NAT Rewrite SDP: Diganti IP lokal menjadi $_sipDomain');
+        debugPrint(
+            '[SIP] NAT Rewrite SDP: Diganti IP lokal menjadi $_sipDomain');
       }
     }
 

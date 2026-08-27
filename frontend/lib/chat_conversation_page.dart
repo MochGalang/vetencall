@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:ui';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:image_picker/image_picker.dart';
 import 'user_chat_detail_page.dart';
 import 'services/api_service.dart';
 import 'services/ws_service.dart';
@@ -39,6 +41,9 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
   String _currentUserId = '';
   String _mySipUsername = '';
   StreamSubscription<Map<String, dynamic>>? _wsSub;
+  bool _isOnline = false;
+  String? _lastSeen;
+  bool _isBlocked = false;
   final ScrollController _scrollController = ScrollController();
 
   /// True jika sipUsername kontak sama dengan sip sendiri (cegah self-call)
@@ -50,18 +55,21 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
   @override
   void initState() {
     super.initState();
+    _isOnline = widget.isOnline;
+    _lastSeen = widget.lastSeen;
     _messageController.addListener(() {
       setState(() {
         _isTyping = _messageController.text.trim().isNotEmpty;
       });
     });
     _loadMessages();
+    _checkBlockStatus();
   }
 
   Future<void> _loadMessages() async {
     final prefs = await SharedPreferences.getInstance();
     _currentUserId = prefs.getString('user_id') ?? '';
-    _mySipUsername = prefs.getString('sip_username') ?? ''; // Simpan SIP sendiri
+    _mySipUsername = prefs.getString('sip_username') ?? ''; 
 
     if (widget.conversationId.isNotEmpty) {
       final response = await ApiService.get(
@@ -74,23 +82,14 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
         }
       }
 
-      // Tandai semua pesan sudah dibaca — selalu dipanggil saat halaman chat dibuka
-      // (tidak bergantung pada sukses/tidaknya fetch pesan di atas)
       debugPrint('[MarkRead] Memanggil POST /chat/read untuk conversation: ${widget.conversationId}');
       final readResponse = await ApiService.post('/chat/read', {
         'conversation_id': widget.conversationId,
         'user_id': _currentUserId,
       });
       debugPrint('[MarkRead] Response: $readResponse');
-      if (readResponse['success'] != true) {
-        debugPrint('[MarkRead] GAGAL! Endpoint mungkin belum ada di backend. Detail: $readResponse');
-      } else {
-        debugPrint('[MarkRead] Sukses! Pesan ditandai sudah dibaca.');
-      }
     }
 
-    // Subscribe ke WsService (sudah diconnect oleh HomeChatPage)
-    // Jika belum terkonek (misal masuk langsung ke percakapan), connect dulu.
     if (!WsService().isConnected) {
       await WsService().connect(_currentUserId);
     }
@@ -101,7 +100,6 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
           if (msgData['conversation_id'].toString() == widget.conversationId) {
             if (mounted) {
               setState(() {
-                // Hindari duplikat jika pesan berasal dari diri sendiri (optimistic update)
                 bool exists = _messages.any((m) =>
                     (m['id'] == msgData['id']) ||
                     (m['sender_id'].toString() == _currentUserId &&
@@ -111,7 +109,6 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                 if (!exists) {
                   _messages.add(msgData);
                 } else {
-                  // Update temp id ke real id dari server
                   final idx = _messages.indexWhere((m) =>
                       m['sender_id'].toString() == _currentUserId &&
                       m['content'] == msgData['content'] &&
@@ -122,6 +119,16 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                 }
               });
               _scrollToBottom();
+            }
+          }
+        } else if (data['type'] == 'status_update') {
+          final statusData = data['data'];
+          if (statusData['user_id'].toString() == widget.receiverId) {
+            if (mounted) {
+              setState(() {
+                _isOnline = statusData['is_online'] == true;
+                _lastSeen = statusData['last_seen']?.toString();
+              });
             }
           }
         }
@@ -150,17 +157,44 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
     });
   }
 
-  Future<void> _sendMessage() async {
-    final text = _messageController.text.trim();
+  Future<void> _checkBlockStatus() async {
+    final response = await ApiService.fetchBlockStatus(widget.receiverId);
+    if (mounted && response['success'] == true && response['data'] != null) {
+      setState(() {
+        _isBlocked = response['data']['is_blocked_by_me'] == true || response['data']['has_blocked_me'] == true;
+      });
+    }
+  }
+
+  Future<void> _pickAndUploadImage(ImageSource source) async {
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: source);
+    
+    if (pickedFile != null) {
+      final uploadRes = await ApiService.uploadFile(pickedFile.path);
+      if (uploadRes['success'] == true) {
+        final mediaUrl = uploadRes['data']['media_url'];
+        _sendMessage(mediaUrl, messageType: 'image');
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Upload gagal: ${uploadRes['message']}')),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _sendMessage(String text, {String messageType = 'text'}) async {
     if (text.isEmpty || widget.conversationId.isEmpty) return;
 
     _messageController.clear();
 
-    // Optimistic Update (biar UI kerasa instan)
     final tempMsg = {
       'id': 'temp_${DateTime.now().millisecondsSinceEpoch}',
       'sender_id': _currentUserId,
       'content': text,
+      'message_type': messageType,
       'created_at': DateTime.now().toUtc().toIso8601String(),
     };
     if (mounted) {
@@ -175,10 +209,10 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
       'sender_id': _currentUserId,
       'receiver_id': widget.receiverId,
       'content': text,
+      'message_type': messageType,
     });
 
     if (response['success'] != true) {
-      // Revert if failed (Opsional, tapi bagus untuk UX)
       if (mounted) {
         setState(() {
           _messages.removeWhere((m) => m['id'] == tempMsg['id']);
@@ -251,8 +285,11 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                         MaterialPageRoute(
                           builder: (context) =>
                               UserChatDetailPage(
+                                userId: widget.receiverId,
                                 userName: widget.userName,
                                 sipUsername: widget.sipUsername,
+                                isOnline: _isOnline,
+                                lastSeen: _lastSeen,
                               ),
                         ),
                       );
@@ -281,7 +318,7 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                                 ),
                               ),
                             ),
-                            if (widget.isOnline)
+                            if (_isOnline)
                               Positioned(
                                 right: 0,
                                 bottom: 0,
@@ -313,9 +350,9 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                                 ),
                               ),
                               Text(
-                                widget.isOnline ? 'Online' : StringUtils.formatLastSeen(widget.lastSeen),
+                                _isOnline ? 'Online' : StringUtils.formatLastSeen(_lastSeen),
                                 style: GoogleFonts.inter(
-                                  color: widget.isOnline ? const Color(0xFF004FCB) : const Color(0xFF6B7280),
+                                  color: _isOnline ? const Color(0xFF004FCB) : const Color(0xFF6B7280),
                                   fontSize: 12,
                                   fontWeight: FontWeight.w500,
                                 ),
@@ -337,9 +374,6 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                       ),
                       tooltip: _isSelfCall ? 'Tidak bisa menelepon diri sendiri' : null,
                       onPressed: _isSelfCall ? null : () {
-                        debugPrint('--- MENEKAN TOMBOL TELEPON ---');
-                        debugPrint(
-                            'SipUsername yang diteruskan ke CallScreen: ${widget.sipUsername}');
                         Navigator.of(context).push(MaterialPageRoute(
                           builder: (_) => CallScreen(
                             callerName: widget.userName,
@@ -447,7 +481,6 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
             timeStr =
                 '${currentDate.hour.toString().padLeft(2, '0')}:${currentDate.minute.toString().padLeft(2, '0')}';
           } catch (e) {
-            // ignore error
           }
         }
 
@@ -466,7 +499,6 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                   showDateHeader = true;
                 }
               } catch (e) {
-                // Abaikan jika format tanggal salah
               }
             }
           }
@@ -477,12 +509,12 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
           messageWidget = Padding(
             padding: const EdgeInsets.only(bottom: 24),
             child: _buildSentMessage(
-                msg['content'] ?? '', timeStr.isEmpty ? null : timeStr),
+                msg, timeStr.isEmpty ? null : timeStr),
           );
         } else {
           messageWidget = Padding(
             padding: const EdgeInsets.only(bottom: 24),
-            child: _buildReceivedMessage(msg['content'] ?? '', timeStr),
+            child: _buildReceivedMessage(msg, timeStr),
           );
         }
 
@@ -516,7 +548,6 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
         const days = ['', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
         return days[msgDate.weekday];
       }
-      // Gunakan StringUtils untuk format tanggal (menghindari duplikasi logika)
       return StringUtils.formatLastSeen(date.toIso8601String())
           .replaceFirst('Terakhir dilihat ', '');
     }
@@ -541,7 +572,8 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
     );
   }
 
-  Widget _buildReceivedMessage(String text, String time) {
+  Widget _buildReceivedMessage(Map<String, dynamic> msg, String time) {
+    final text = msg['content'] ?? '';
     return Align(
       alignment: Alignment.centerLeft,
       child: Column(
@@ -560,32 +592,22 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                 ),
               ],
             ),
-            child: Text(
-              text,
-              style: GoogleFonts.inter(
-                color: const Color(0xFF131B2E),
-                fontSize: 14,
-                height: 1.4,
-              ),
-            ),
+            child: msg['message_type'] == 'image'
+                ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(text, width: 200, fit: BoxFit.cover))
+                : Text(text, style: GoogleFonts.inter(color: const Color(0xFF131B2E), fontSize: 14, height: 1.4)),
           ),
           const SizedBox(height: 4),
           Padding(
             padding: const EdgeInsets.only(left: 4),
-            child: Text(
-              time,
-              style: GoogleFonts.inter(
-                color: const Color(0xFF424656),
-                fontSize: 10,
-              ),
-            ),
+            child: Text(time, style: GoogleFonts.inter(color: const Color(0xFF424656), fontSize: 10)),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildSentMessage(String text, String? time, {int readStatus = 0}) {
+  Widget _buildSentMessage(Map<String, dynamic> msg, String? time, {int readStatus = 0}) {
+    final text = msg['content'] ?? '';
     return Align(
       alignment: Alignment.centerRight,
       child: Column(
@@ -604,34 +626,19 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                 ),
               ],
             ),
-            child: Text(
-              text,
-              style: GoogleFonts.inter(
-                color: const Color(0xFFF7F6FF),
-                fontSize: 14,
-                height: 1.4,
-              ),
-            ),
+            child: msg['message_type'] == 'image'
+                ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(text, width: 200, fit: BoxFit.cover))
+                : Text(text, style: GoogleFonts.inter(color: const Color(0xFFF7F6FF), fontSize: 14, height: 1.4)),
           ),
           if (time != null) ...[
             const SizedBox(height: 4),
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  time,
-                  style: GoogleFonts.inter(
-                    color: const Color(0xFF424656),
-                    fontSize: 10,
-                  ),
-                ),
+                Text(time, style: GoogleFonts.inter(color: const Color(0xFF424656), fontSize: 10)),
                 const SizedBox(width: 4),
-                if (readStatus == 1)
-                  const Icon(Icons.check_rounded,
-                      size: 14, color: Color(0xFF424656)),
-                if (readStatus == 2)
-                  const Icon(Icons.done_all_rounded,
-                      size: 14, color: Color(0xFF0065FF)),
+                if (readStatus == 1) const Icon(Icons.check_rounded, size: 14, color: Color(0xFF424656)),
+                if (readStatus == 2) const Icon(Icons.done_all_rounded, size: 14, color: Color(0xFF0065FF)),
               ],
             ),
           ],
@@ -641,6 +648,20 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
   }
 
   Widget _buildBottomInputArea() {
+    if (_isBlocked) {
+      return SafeArea(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          color: const Color(0xFFF1F5F9),
+          alignment: Alignment.center,
+          child: Text(
+            'Anda tidak dapat membalas percakapan ini.',
+            style: GoogleFonts.inter(color: const Color(0xFF64748B), fontSize: 14),
+          ),
+        ),
+      );
+    }
+
     return SafeArea(
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -658,30 +679,24 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.sentiment_satisfied_alt_rounded,
-                        color: Colors.grey.shade700),
+                    Icon(Icons.sentiment_satisfied_alt_rounded, color: Colors.grey.shade700),
                     const SizedBox(width: 12),
                     Expanded(
                       child: TextField(
                         controller: _messageController,
                         decoration: InputDecoration(
                           hintText: 'tulis pesan...',
-                          hintStyle: GoogleFonts.inter(
-                            color: Colors.black.withValues(alpha: 0.5),
-                            fontSize: 16,
-                          ),
+                          hintStyle: GoogleFonts.inter(color: Colors.black.withValues(alpha: 0.5), fontSize: 16),
                           border: InputBorder.none,
                         ),
                       ),
                     ),
                     GestureDetector(
                       onTap: () => _showAttachmentMenu(context),
-                      child: Icon(Icons.attach_file_rounded,
-                          color: Colors.grey.shade700),
+                      child: Icon(Icons.attach_file_rounded, color: Colors.grey.shade700),
                     ),
                     const SizedBox(width: 8),
-                    Icon(Icons.camera_alt_outlined,
-                        color: Colors.grey.shade700),
+                    Icon(Icons.camera_alt_outlined, color: Colors.grey.shade700),
                   ],
                 ),
               ),
@@ -698,15 +713,11 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                 icon: Icon(
                   _isTyping ? Icons.send_rounded : Icons.mic_rounded,
                   color: Colors.white,
-                  size: _isTyping
-                      ? 20
-                      : 24, // Send icon is naturally a bit larger visually, so we scale it down slightly
+                  size: _isTyping ? 20 : 24,
                 ),
                 onPressed: () {
                   if (_isTyping) {
-                    _sendMessage();
-                  } else {
-                    // Logika untuk merekam voice note
+                    _sendMessage(_messageController.text.trim());
                   }
                 },
               ),
@@ -724,29 +735,20 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
       barrierColor: Colors.transparent,
       builder: (context) {
         return Container(
-          margin: const EdgeInsets.only(
-              left: 16, right: 16, bottom: 80), // Positioned above input
+          margin: const EdgeInsets.only(left: 16, right: 16, bottom: 80),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(16),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.1),
-                blurRadius: 20,
-                offset: const Offset(0, 4),
-              ),
-            ],
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 20, offset: const Offset(0, 4))],
           ),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(16),
             child: BackdropFilter(
               filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
               child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
                 decoration: BoxDecoration(
                   color: const Color(0xFFFAF8FF).withValues(alpha: 0.85),
-                  border: Border.all(
-                      color: const Color(0xFFC2C6D8).withValues(alpha: 0.2)),
+                  border: Border.all(color: const Color(0xFFC2C6D8).withValues(alpha: 0.2)),
                 ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -754,42 +756,9 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
-                        _buildAttachmentIcon(
-                          icon: Icons.insert_drive_file_outlined,
-                          color: const Color(0xFFFF9800),
-                          label: 'Document',
-                        ),
-                        _buildAttachmentIcon(
-                          icon: Icons.camera_alt_outlined,
-                          color: const Color(0xFF00BFA5),
-                          label: 'Camera',
-                        ),
-                        _buildAttachmentIcon(
-                          icon: Icons.image_outlined,
-                          color: const Color(0xFF9C27B0),
-                          label: 'Gallery',
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        _buildAttachmentIcon(
-                          icon: Icons.headphones_outlined,
-                          color: const Color(0xFF4CAF50),
-                          label: 'Audio',
-                        ),
-                        _buildAttachmentIcon(
-                          icon: Icons.location_on_outlined,
-                          color: const Color(0xFFF44336),
-                          label: 'Location',
-                        ),
-                        _buildAttachmentIcon(
-                          icon: Icons.person_outline_rounded,
-                          color: const Color(0xFF2196F3),
-                          label: 'Contact',
-                        ),
+                        _buildAttachmentIcon(icon: Icons.insert_drive_file_outlined, color: const Color(0xFFFF9800), label: 'Document'),
+                        _buildAttachmentIcon(icon: Icons.camera_alt_outlined, color: const Color(0xFF00BFA5), label: 'Camera', onTap: () { Navigator.pop(context); _pickAndUploadImage(ImageSource.camera); }),
+                        _buildAttachmentIcon(icon: Icons.image_outlined, color: const Color(0xFF9C27B0), label: 'Gallery', onTap: () { Navigator.pop(context); _pickAndUploadImage(ImageSource.gallery); }),
                       ],
                     ),
                   ],
@@ -802,16 +771,9 @@ class _ChatConversationPageState extends State<ChatConversationPage> {
     );
   }
 
-  Widget _buildAttachmentIcon({
-    required IconData icon,
-    required Color color,
-    required String label,
-  }) {
+  Widget _buildAttachmentIcon({required IconData icon, required Color color, required String label, VoidCallback? onTap}) {
     return GestureDetector(
-      onTap: () {
-        Navigator.pop(context);
-        // Handle attachment tap
-      },
+      onTap: onTap,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

@@ -70,7 +70,23 @@ class _GroupConversationPageState extends State<GroupConversationPage> {
             if (msgData['group_id'].toString() == widget.groupId) {
               if (mounted) {
                 setState(() {
-                  _messages.add(msgData);
+                  bool exists = _messages.any((m) =>
+                      (m['id'] == msgData['id']) ||
+                      (m['sender_id'].toString() == _currentUserId &&
+                          m['content'] == msgData['content'] &&
+                          m['id'].toString().startsWith('temp_')));
+
+                  if (!exists) {
+                    _messages.add(msgData);
+                  } else {
+                    final idx = _messages.indexWhere((m) =>
+                        m['sender_id'].toString() == _currentUserId &&
+                        m['content'] == msgData['content'] &&
+                        m['id'].toString().startsWith('temp_'));
+                    if (idx != -1) {
+                      _messages[idx] = msgData;
+                    }
+                  }
                 });
                 _scrollToBottom();
               }
@@ -109,6 +125,21 @@ class _GroupConversationPageState extends State<GroupConversationPage> {
     if (text.isEmpty || widget.groupId.isEmpty) return;
 
     _messageController.clear();
+
+    final tempMsg = {
+      'id': 'temp_${DateTime.now().millisecondsSinceEpoch}',
+      'group_id': widget.groupId,
+      'sender_id': _currentUserId,
+      'content': text,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    };
+
+    if (mounted) {
+      setState(() {
+        _messages.add(tempMsg);
+      });
+      _scrollToBottom();
+    }
 
     if (_channel != null) {
       _channel!.sink.add(jsonEncode({
@@ -227,7 +258,7 @@ class _GroupConversationPageState extends State<GroupConversationPage> {
                                 overflow: TextOverflow.ellipsis,
                               ),
                               Text(
-                                widget.membersText,
+                                widget.membersText.isNotEmpty ? widget.membersText : 'Anggota Grup',
                                 style: GoogleFonts.inter(
                                   color: const Color(0xFF01070F)
                                       .withValues(alpha: 0.5),

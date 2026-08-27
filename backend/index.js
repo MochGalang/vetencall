@@ -75,6 +75,12 @@ async function initDb() {
             await pool.query("SHOW COLUMNS FROM users LIKE 'fcm_token'").then(async ([rows]) => {
                 if (rows.length === 0) await pool.query("ALTER TABLE users ADD COLUMN fcm_token TEXT");
             });
+            await pool.query("SHOW COLUMNS FROM groups_chat LIKE 'description'").then(async ([rows]) => {
+                if (rows.length === 0) await pool.query("ALTER TABLE groups_chat ADD COLUMN description TEXT");
+            });
+            await pool.query("SHOW COLUMNS FROM groups_chat LIKE 'avatar_url'").then(async ([rows]) => {
+                if (rows.length === 0) await pool.query("ALTER TABLE groups_chat ADD COLUMN avatar_url VARCHAR(255)");
+            });
         } catch (colErr) {
             console.log("⚠️ Alter table skip (already exists or error):", colErr.message);
         }
@@ -272,9 +278,14 @@ app.get('/api/conversations', async (req, res) => {
 // 3.5. GROUP CHAT
 // ==========================================
 app.post('/api/groups', async (req, res) => {
-    const { name, member_ids } = req.body;
+    const { name, member_ids, creator_id } = req.body;
     if (!name || !member_ids || !Array.isArray(member_ids) || member_ids.length === 0) {
         return res.status(400).json({ success: false, message: 'Nama grup dan member_ids (array) wajib diisi.' });
+    }
+    
+    // Inject creator_id ke member_ids jika belum ada
+    if (creator_id && !member_ids.includes(creator_id)) {
+        member_ids.push(creator_id);
     }
     
     try {
@@ -348,6 +359,119 @@ app.get('/api/groups/messages', async (req, res) => {
         });
     } catch (error) {
         res.json({ success: false, data: [] });
+    }
+});
+
+app.post('/api/groups/messages', async (req, res) => {
+    const { group_id, sender_id, content } = req.body;
+    try {
+        const [result] = await pool.query(
+            "INSERT INTO group_messages (group_id, sender_id, content) VALUES (?, ?, ?)",
+            [group_id, sender_id, content]
+        );
+        
+        const [senderRows] = await pool.query("SELECT username FROM users WHERE id = ?", [sender_id]);
+        const senderName = senderRows.length > 0 ? senderRows[0].username : "Unknown";
+
+        const msgPayload = JSON.stringify({
+            type: 'new_group_message',
+            data: {
+                id: result.insertId.toString(),
+                group_id: group_id.toString(),
+                sender_id: sender_id.toString(),
+                sender_name: senderName,
+                content: content,
+                created_at: new Date().toISOString()
+            }
+        });
+
+        const [members] = await pool.query("SELECT user_id FROM group_members WHERE group_id = ?", [group_id]);
+        
+        for (const member of members) {
+            const memberId = member.user_id.toString();
+            if (clients && clients.has(memberId)) {
+                clients.get(memberId).forEach(client => {
+                    if (client.readyState === 1) client.send(msgPayload);
+                });
+            } else if (memberId !== sender_id.toString()) {
+                sendPushNotification(memberId, `Pesan Grup dari ${senderName}`, content);
+            }
+        }
+        res.json({ success: true, data: { id: result.insertId.toString() } });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.get('/api/groups/:groupId', async (req, res) => {
+    const groupId = req.params.groupId;
+    try {
+        const [groupRows] = await pool.query("SELECT * FROM groups_chat WHERE id = ?", [groupId]);
+        if (groupRows.length === 0) return res.status(404).json({ success: false, message: 'Grup tidak ditemukan' });
+        
+        const group = groupRows[0];
+        const [members] = await pool.query("SELECT u.id, u.username as name, u.sip_username, u.fcm_token FROM group_members gm JOIN users u ON gm.user_id = u.id WHERE gm.group_id = ?", [groupId]);
+        
+        res.json({
+            success: true,
+            data: {
+                id: group.id.toString(),
+                name: group.name,
+                description: group.description || "",
+                avatar_url: group.avatar_url || "",
+                created_at: group.created_at,
+                members: members.map(m => ({ id: m.id.toString(), name: m.name, sip_username: m.sip_username, avatar_url: "" }))
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.post('/api/groups/:groupId/leave', async (req, res) => {
+    const groupId = req.params.groupId;
+    const { user_id } = req.body;
+    try {
+        await pool.query("DELETE FROM group_members WHERE group_id = ? AND user_id = ?", [groupId, user_id]);
+        res.json({ success: true, message: "Berhasil keluar dari grup" });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.post('/api/groups/:groupId/members', async (req, res) => {
+    const groupId = req.params.groupId;
+    const { user_ids } = req.body;
+    if (!user_ids || !Array.isArray(user_ids)) return res.status(400).json({ success: false });
+    try {
+        const values = user_ids.map(id => [groupId, id]);
+        await pool.query("INSERT IGNORE INTO group_members (group_id, user_id) VALUES ?", [values]);
+        res.json({ success: true, message: "Berhasil menambah anggota" });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.put('/api/groups/:groupId', async (req, res) => {
+    const groupId = req.params.groupId;
+    const { name, description, avatar_url } = req.body;
+    try {
+        let updateQuery = "UPDATE groups_chat SET ";
+        const updates = [];
+        const params = [];
+        
+        if (name !== undefined) { updates.push("name = ?"); params.push(name); }
+        if (description !== undefined) { updates.push("description = ?"); params.push(description); }
+        if (avatar_url !== undefined) { updates.push("avatar_url = ?"); params.push(avatar_url); }
+        
+        if (updates.length > 0) {
+            updateQuery += updates.join(", ") + " WHERE id = ?";
+            params.push(groupId);
+            await pool.query(updateQuery, params);
+        }
+        res.json({ success: true, message: "Grup berhasil diupdate" });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
     }
 });
 

@@ -1,0 +1,14 @@
+# Binaries
+backend
+backend_linux
+backend.exe
+
+# Logs
+*.log
+backend.log
+
+# Node
+node_modules/
+
+# OS Files
+.DS_Store
